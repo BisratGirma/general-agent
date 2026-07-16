@@ -1,12 +1,26 @@
 import os
-import gradio as gr
-import requests
 import inspect
+
+import gradio as gr
 import pandas as pd
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # (Keep Constants as is)
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
+HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+
+
+def get_hf_token() -> str | None:
+    for env_name in HF_TOKEN_ENV_VARS:
+        token = os.getenv(env_name)
+        if token and token.strip():
+            return token.strip()
+    return None
+
 
 # --- Basic Agent Definition ---
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
@@ -19,7 +33,7 @@ class BasicAgent:
         print(f"Agent returning fixed answer: {fixed_answer}")
         return fixed_answer
 
-def run_and_submit_all( profile: gr.OAuthProfile | None):
+def run_and_submit_all(username: str | None = None):
     """
     Fetches all questions, runs the BasicAgent on them, submits all answers,
     and displays the results.
@@ -27,16 +41,23 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
     # --- Determine HF Space Runtime URL and Repo URL ---
     space_id = os.getenv("SPACE_ID") # Get the SPACE_ID for sending link to the code
 
-    if profile:
-        username= f"{profile.username}"
-        print(f"User logged in: {username}")
-    else:
-        print("User not logged in.")
-        return "Please Login to Hugging Face with the button.", None
+    if not username or not username.strip():
+        print("No username provided.")
+        return "Please enter your Hugging Face username before running the evaluation.", None
+
+    username = username.strip()
+    print(f"Using submitted username: {username}")
 
     api_url = DEFAULT_API_URL
     questions_url = f"{api_url}/questions"
     submit_url = f"{api_url}/submit"
+
+    hf_token = get_hf_token()
+    auth_headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+    if hf_token:
+        print("Hugging Face token found in environment.")
+    else:
+        print("No Hugging Face token found. Continuing without an authorization header.")
 
     # 1. Instantiate Agent ( modify this part to create your agent)
     try:
@@ -51,7 +72,7 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
     # 2. Fetch Questions
     print(f"Fetching questions from: {questions_url}")
     try:
-        response = requests.get(questions_url, timeout=15)
+        response = requests.get(questions_url, headers=auth_headers, timeout=15)
         response.raise_for_status()
         questions_data = response.json()
         if not questions_data:
@@ -99,7 +120,7 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
     # 5. Submit
     print(f"Submitting {len(answers_payload)} answers to: {submit_url}")
     try:
-        response = requests.post(submit_url, json=submission_data, timeout=60)
+        response = requests.post(submit_url, headers=auth_headers, json=submission_data, timeout=60)
         response.raise_for_status()
         result_data = response.json()
         final_status = (
@@ -158,7 +179,11 @@ with gr.Blocks() as demo:
         """
     )
 
-    gr.LoginButton()
+    username_input = gr.Textbox(
+        label="Hugging Face username",
+        placeholder="Enter your username for submission",
+        lines=1,
+    )
 
     run_button = gr.Button("Run Evaluation & Submit All Answers")
 
@@ -168,6 +193,7 @@ with gr.Blocks() as demo:
 
     run_button.click(
         fn=run_and_submit_all,
+        inputs=[username_input],
         outputs=[status_output, results_table]
     )
 
@@ -193,4 +219,12 @@ if __name__ == "__main__":
     print("-"*(60 + len(" App Starting ")) + "\n")
 
     print("Launching Gradio Interface for Basic Agent Evaluation...")
-    demo.launch(debug=True, share=False)
+    launch_kwargs = {
+        "debug": True,
+        "share": False,
+        "server_name": "0.0.0.0",
+        "server_port": 7862,
+    }
+    if "ssr_mode" in inspect.signature(demo.launch).parameters:
+        launch_kwargs["ssr_mode"] = False
+    demo.launch(**launch_kwargs)
