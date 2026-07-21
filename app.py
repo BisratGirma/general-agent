@@ -1,5 +1,4 @@
 import os
-import inspect
 
 import gradio as gr
 import pandas as pd
@@ -224,7 +223,6 @@ if __name__ == "__main__":
         "share": False,
         "server_name": "0.0.0.0",
         "server_port": 7862,
+        "ssr": False,
     }
-    if "ssr_mode" in inspect.signature(demo.launch).parameters:
-        launch_kwargs["ssr_mode"] = False
     demo.launch(**launch_kwargs)
