@@ -221,8 +221,8 @@ if __name__ == "__main__":
     launch_kwargs = {
         "debug": True,
         "share": False,
-        "server_name": "0.0.0.0",
+        "server_name": "localhost",
         "server_port": 7862,
-        "ssr": False,
+        "ssr_mode": False,
     }
     demo.launch(**launch_kwargs)
