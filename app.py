@@ -1,16 +1,24 @@
 import os
+from typing import TypedDict
 
 import gradio as gr
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from langgraph.graph import END, START, StateGraph
 
 load_dotenv()
 
-# (Keep Constants as is)
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+
+
+class AgentState(TypedDict, total=False):
+    question: str
+    task_type: str
+    answer: str
+    evidence: str
 
 
 def get_hf_token() -> str | None:
@@ -21,24 +29,129 @@ def get_hf_token() -> str | None:
     return None
 
 
-# --- Basic Agent Definition ---
-# ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
-class BasicAgent:
+def _coerce_text(value) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "content"):
+        return str(value.content)
+    if isinstance(value, list):
+        return "\n".join(str(part) for part in value)
+    return str(value)
+
+
+def _classify_task(question: str) -> str:
+    normalized = question.lower()
+    if any(keyword in normalized for keyword in ("image", "photo", "picture", "screenshot", "analyze", "describe")):
+        return "image"
+    if any(keyword in normalized for keyword in ("youtube", "video", "transcript", "watch", "clip")):
+        return "video"
+    if any(keyword in normalized for keyword in ("website", "webpage", "url", "site", "browse", "review")):
+        return "website"
+    return "general"
+
+
+def _build_answer(task_type: str, question: str) -> str:
+    if task_type == "image":
+        return (
+            "Image-analysis workflow ready. I would inspect the image, identify the key visual details, "
+            "and answer the question with grounded observations."
+        )
+    if task_type == "website":
+        return (
+            "Website-review workflow ready. I would inspect the page content, assess clarity, trustworthiness, "
+            "usability, and summarize strengths and risks."
+        )
+    if task_type == "video":
+        return (
+            "Video-review workflow ready. I would extract the transcript or key moments, summarize the content, "
+            "and answer the question using evidence from the video."
+        )
+    return (
+        "General Q&A workflow ready. I would answer directly, clarify ambiguity when needed, "
+        "and provide a concise, helpful response."
+    )
+
+
+def _build_llm_or_fallback():
+    try:
+        from langchain_openai import ChatOpenAI
+    except Exception:
+        return None
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    return ChatOpenAI(model=model_name, temperature=0.2)
+
+
+class LangGraphAgent:
     def __init__(self):
-        print("BasicAgent initialized.")
+        print("LangGraphAgent initialized.")
+        self.llm = _build_llm_or_fallback()
+        self.graph = self._build_graph()
+
+    def _build_graph(self):
+        def route_question(state: AgentState) -> dict[str, str]:
+            question = state.get("question", "")
+            task_type = _classify_task(question)
+            if self.llm is not None:
+                try:
+                    prompt = (
+                        "Classify the user's request into one of: general, image, website, or video.\n"
+                        f"Question: {question}\n"
+                        "Return only one label."
+                    )
+                    response = self.llm.invoke(prompt)
+                    task_type = _coerce_text(response).strip().lower() or task_type
+                except Exception as exc:
+                    print(f"LLM routing failed, falling back to heuristic routing: {exc}")
+            return {"task_type": task_type}
+
+        def answer_question(state: AgentState) -> dict[str, str]:
+            question = state.get("question", "")
+            task_type = state.get("task_type", "general")
+            if self.llm is not None:
+                try:
+                    prompt = (
+                        f"Task type: {task_type}\n"
+                        f"Question: {question}\n"
+                        "Provide a concise, practical answer and mention how you would proceed if more evidence is needed."
+                    )
+                    answer = _coerce_text(self.llm.invoke(prompt))
+                except Exception as exc:
+                    print(f"LLM answer generation failed, falling back to template response: {exc}")
+                    answer = _build_answer(task_type, question)
+            else:
+                answer = _build_answer(task_type, question)
+            return {"answer": answer}
+
+        workflow = StateGraph(AgentState)
+        workflow.add_node("route_question", route_question)
+        workflow.add_node("answer_question", answer_question)
+        workflow.add_edge(START, "route_question")
+        workflow.add_edge("route_question", "answer_question")
+        workflow.add_edge("answer_question", END)
+        return workflow.compile()
+
     def __call__(self, question: str) -> str:
         print(f"Agent received question (first 50 chars): {question[:50]}...")
-        fixed_answer = "This is a default answer."
-        print(f"Agent returning fixed answer: {fixed_answer}")
-        return fixed_answer
+        state = self.graph.invoke({"question": question})
+        answer = state.get("answer", "")
+        print(f"Agent returning answer: {answer[:120]}...")
+        return answer or "I could not produce an answer for that request."
+
+
+AGENT = LangGraphAgent()
+
 
 def run_and_submit_all(username: str | None = None):
     """
-    Fetches all questions, runs the BasicAgent on them, submits all answers,
+    Fetches all questions, runs the LangGraph-based agent on them, submits all answers,
     and displays the results.
     """
-    # --- Determine HF Space Runtime URL and Repo URL ---
-    space_id = os.getenv("SPACE_ID") # Get the SPACE_ID for sending link to the code
+    space_id = os.getenv("SPACE_ID")
 
     if not username or not username.strip():
         print("No username provided.")
@@ -58,38 +171,29 @@ def run_and_submit_all(username: str | None = None):
     else:
         print("No Hugging Face token found. Continuing without an authorization header.")
 
-    # 1. Instantiate Agent ( modify this part to create your agent)
-    try:
-        agent = BasicAgent()
-    except Exception as e:
-        print(f"Error instantiating agent: {e}")
-        return f"Error initializing agent: {e}", None
-    # In the case of an app running as a hugging Face space, this link points toward your codebase ( usefull for others so please keep it public)
     agent_code = f"https://huggingface.co/spaces/{space_id}/tree/main"
     print(agent_code)
 
-    # 2. Fetch Questions
     print(f"Fetching questions from: {questions_url}")
     try:
         response = requests.get(questions_url, headers=auth_headers, timeout=15)
         response.raise_for_status()
         questions_data = response.json()
         if not questions_data:
-             print("Fetched questions list is empty.")
-             return "Fetched questions list is empty or invalid format.", None
+            print("Fetched questions list is empty.")
+            return "Fetched questions list is empty or invalid format.", None
         print(f"Fetched {len(questions_data)} questions.")
     except requests.exceptions.RequestException as e:
         print(f"Error fetching questions: {e}")
         return f"Error fetching questions: {e}", None
     except requests.exceptions.JSONDecodeError as e:
-         print(f"Error decoding JSON response from questions endpoint: {e}")
-         print(f"Response text: {response.text[:500]}")
-         return f"Error decoding server response for questions: {e}", None
+        print(f"Error decoding JSON response from questions endpoint: {e}")
+        print(f"Response text: {response.text[:500]}")
+        return f"Error decoding server response for questions: {e}", None
     except Exception as e:
         print(f"An unexpected error occurred fetching questions: {e}")
         return f"An unexpected error occurred fetching questions: {e}", None
 
-    # 3. Run your Agent
     results_log = []
     answers_payload = []
     print(f"Running agent on {len(questions_data)} questions...")
@@ -100,23 +204,21 @@ def run_and_submit_all(username: str | None = None):
             print(f"Skipping item with missing task_id or question: {item}")
             continue
         try:
-            submitted_answer = agent(question_text)
+            submitted_answer = AGENT(question_text)
             answers_payload.append({"task_id": task_id, "submitted_answer": submitted_answer})
             results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": submitted_answer})
         except Exception as e:
-             print(f"Error running agent on task {task_id}: {e}")
-             results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": f"AGENT ERROR: {e}"})
+            print(f"Error running agent on task {task_id}: {e}")
+            results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": f"AGENT ERROR: {e}"})
 
     if not answers_payload:
         print("Agent did not produce any answers to submit.")
         return "Agent did not produce any answers to submit.", pd.DataFrame(results_log)
 
-    # 4. Prepare Submission 
     submission_data = {"username": username.strip(), "agent_code": agent_code, "answers": answers_payload}
     status_update = f"Agent finished. Submitting {len(answers_payload)} answers for user '{username}'..."
     print(status_update)
 
-    # 5. Submit
     print(f"Submitting {len(answers_payload)} answers to: {submit_url}")
     try:
         response = requests.post(submit_url, headers=auth_headers, json=submission_data, timeout=60)
@@ -160,47 +262,50 @@ def run_and_submit_all(username: str | None = None):
         return status_message, results_df
 
 
-# --- Build Gradio Interface using Blocks ---
 with gr.Blocks() as demo:
-    gr.Markdown("# Basic Agent Evaluation Runner")
+    gr.Markdown("# LangGraph Agent Evaluation Runner")
     gr.Markdown(
         """
-        **Instructions:**
+        **What this version does:**
 
-        1.  Please clone this space, then modify the code to define your agent's logic, the tools, the necessary packages, etc ...
-        2.  Log in to your Hugging Face account using the button below. This uses your HF username for submission.
-        3.  Click 'Run Evaluation & Submit All Answers' to fetch questions, run your agent, submit answers, and see the score.
+        - Routes questions into a simple workflow for general Q&A, image analysis, website review, or video review.
+        - Uses a LangGraph graph for the orchestration layer.
+        - Keeps the Gradio UI for quick testing while you develop stronger tools.
 
-        ---
-        **Disclaimers:**
-        Once clicking on the "submit button, it can take quite some time ( this is the time for the agent to go through all the questions).
-        This space provides a basic setup and is intentionally sub-optimal to encourage you to develop your own, more robust solution. For instance for the delay process of the submit button, a solution could be to cache the answers and submit in a seperate action or even to answer the questions in async.
+        **Next steps:** add real browser tools, YouTube transcription tools, and a multimodal model for image understanding.
         """
     )
+
+    question_input = gr.Textbox(
+        label="Ask the agent",
+        placeholder="Try: review this website, analyze this image, or summarize this video topic",
+        lines=3,
+    )
+    ask_button = gr.Button("Ask Agent")
+    agent_output = gr.Textbox(label="Agent Response", lines=8, interactive=False)
 
     username_input = gr.Textbox(
         label="Hugging Face username",
         placeholder="Enter your username for submission",
         lines=1,
     )
-
     run_button = gr.Button("Run Evaluation & Submit All Answers")
 
     status_output = gr.Textbox(label="Run Status / Submission Result", lines=5, interactive=False)
-    # Removed max_rows=10 from DataFrame constructor
     results_table = gr.DataFrame(label="Questions and Agent Answers", wrap=True)
 
+    ask_button.click(fn=lambda question: AGENT(question), inputs=[question_input], outputs=[agent_output])
     run_button.click(
         fn=run_and_submit_all,
         inputs=[username_input],
-        outputs=[status_output, results_table]
+        outputs=[status_output, results_table],
     )
 
+
 if __name__ == "__main__":
-    print("\n" + "-"*30 + " App Starting " + "-"*30)
-    # Check for SPACE_HOST and SPACE_ID at startup for information
+    print("\n" + "-" * 30 + " App Starting " + "-" * 30)
     space_host_startup = os.getenv("SPACE_HOST")
-    space_id_startup = os.getenv("SPACE_ID") # Get SPACE_ID at startup
+    space_id_startup = os.getenv("SPACE_ID")
 
     if space_host_startup:
         print(f"✅ SPACE_HOST found: {space_host_startup}")
@@ -208,16 +313,16 @@ if __name__ == "__main__":
     else:
         print("ℹ️  SPACE_HOST environment variable not found (running locally?).")
 
-    if space_id_startup: # Print repo URLs if SPACE_ID is found
+    if space_id_startup:
         print(f"✅ SPACE_ID found: {space_id_startup}")
         print(f"   Repo URL: https://huggingface.co/spaces/{space_id_startup}")
         print(f"   Repo Tree URL: https://huggingface.co/spaces/{space_id_startup}/tree/main")
     else:
         print("ℹ️  SPACE_ID environment variable not found (running locally?). Repo URL cannot be determined.")
 
-    print("-"*(60 + len(" App Starting ")) + "\n")
+    print("-" * (60 + len(" App Starting ")) + "\n")
 
-    print("Launching Gradio Interface for Basic Agent Evaluation...")
+    print("Launching Gradio Interface for the LangGraph Agent...")
     launch_kwargs = {
         "debug": True,
         "share": False,
