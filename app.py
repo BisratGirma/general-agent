@@ -9,9 +9,26 @@ from langgraph.graph import END, START, StateGraph
 
 load_dotenv()
 
+
+def _initialize_environment() -> None:
+    # Ensure dotenv-loaded and alias tokens are normalized for the app.
+    os.environ.setdefault(
+        "HF_MODEL",
+        os.getenv("HF_MODEL") or os.getenv("HUGGINGFACE_MODEL") or "thinkingmachines/Inkling:together",
+    )
+    if not os.getenv("HUGGINGFACE_HUB_TOKEN"):
+        for alias in ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+            alias_token = os.getenv(alias)
+            if alias_token:
+                os.environ["HUGGINGFACE_HUB_TOKEN"] = alias_token.strip()
+                break
+
+
+_initialize_environment()
+
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
-HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN")
 
 
 class AgentState(TypedDict, total=False):
@@ -74,16 +91,23 @@ def _build_answer(task_type: str, question: str) -> str:
 
 def _build_llm_or_fallback():
     try:
-        from langchain_openai import ChatOpenAI
+        from huggingface_hub import InferenceClient
     except Exception:
         return None
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+    hf_token = get_hf_token()
+    print(f"Attempting to retrieve Hugging Face token from environment variables: {HF_TOKEN_ENV_VARS}")
+    print(f"Hugging Face token retrieved: {'Yes' if hf_token else 'No'}")
+    if not hf_token:
         return None
 
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model_name, temperature=0.2)
+    model_name = os.getenv("HF_MODEL") or os.getenv("HUGGINGFACE_MODEL") or "moonshotai/Kimi-K2.5"
+    try:
+        client = InferenceClient(model=model_name, token=hf_token)
+        return client
+    except Exception as exc:
+        print(f"Failed to create Hugging Face InferenceClient: {exc}")
+        return None
 
 
 class LangGraphAgent:
@@ -93,6 +117,36 @@ class LangGraphAgent:
         self.graph = self._build_graph()
 
     def _build_graph(self):
+        def _hf_response(client, prompt: str) -> str:
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=256,
+                temperature=0.2,
+                top_p=0.95,
+                stream=False,
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+
+            if hasattr(response, "choices") and response.choices:
+                first_choice = response.choices[0]
+                if hasattr(first_choice, "message"):
+                    return _coerce_text(getattr(first_choice.message, "content", None))
+                if hasattr(first_choice, "text"):
+                    return _coerce_text(getattr(first_choice, "text", None))
+
+            if isinstance(response, dict):
+                choices = response.get("choices", [])
+                if choices:
+                    choice = choices[0]
+                    if isinstance(choice, dict):
+                        message = choice.get("message")
+                        if isinstance(message, dict):
+                            return _coerce_text(message.get("content") or message.get("text"))
+                        return _coerce_text(choice.get("text"))
+                    return _coerce_text(choice)
+
+            return _coerce_text(response)
+
         def route_question(state: AgentState) -> dict[str, str]:
             question = state.get("question", "")
             task_type = _classify_task(question)
@@ -103,10 +157,11 @@ class LangGraphAgent:
                         f"Question: {question}\n"
                         "Return only one label."
                     )
-                    response = self.llm.invoke(prompt)
-                    task_type = _coerce_text(response).strip().lower() or task_type
+                    print(f"self llm is not None, ")
+                    response_text = _hf_response(self.llm, prompt)
+                    task_type = response_text.strip().lower() or task_type
                 except Exception as exc:
-                    print(f"LLM routing failed, falling back to heuristic routing: {exc}")
+                    print(f"HF routing failed, falling back to heuristic routing: {exc}")
             return {"task_type": task_type}
 
         def answer_question(state: AgentState) -> dict[str, str]:
@@ -119,9 +174,10 @@ class LangGraphAgent:
                         f"Question: {question}\n"
                         "Provide a concise, practical answer and mention how you would proceed if more evidence is needed."
                     )
-                    answer = _coerce_text(self.llm.invoke(prompt))
+                    answer_text = _hf_response(self.llm, prompt)
+                    answer = answer_text.strip() or _build_answer(task_type, question)
                 except Exception as exc:
-                    print(f"LLM answer generation failed, falling back to template response: {exc}")
+                    print(f"Hugging Face inference failed, falling back to template response: {exc}")
                     answer = _build_answer(task_type, question)
             else:
                 answer = _build_answer(task_type, question)
