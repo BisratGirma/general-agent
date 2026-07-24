@@ -50,7 +50,7 @@ def test_build_page_selection_prompt_includes_user_query_and_results():
     assert "from the list" in prompt
     assert "- Energy News / https://example.com/news" in prompt
     assert "- Renewables Today / https://example.com/renew" in prompt
-    assert "which website link (page) contains the information the user requested?" in prompt
+    assert "Choose the single website link (page) that most directly contains the information the user requested." in prompt
 
 
 def test_select_best_page_falls_back_to_first_valid_url(monkeypatch):
