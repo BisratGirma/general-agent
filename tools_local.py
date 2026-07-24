@@ -1,4 +1,5 @@
 import ast
+import base64
 import csv
 import logging
 import os
@@ -15,6 +16,8 @@ import requests
 logger = logging.getLogger(__name__)
 
 SUPPORTED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac", ".ogg")
+OLLAMA_VISION_MODEL = "gemma4:e4b"
+OLLAMA_BASE_URL = "http://localhost:11434"
 
 
 def _format_error(tool_name: str, message: str) -> str:
@@ -474,19 +477,69 @@ def parse_spreadsheet(file_path: str, sheet_name: Optional[str] = None, query: O
 
 
 def analyze_image(image_path: str, task_type: str = "general", prompt: Optional[str] = None) -> str:
-    """Provide a local-only image analysis placeholder that checks for Ollama availability."""
+    """Analyze an image using the local Ollama vision model (gemma4:e4b).
+
+    Args:
+        image_path: Absolute or relative path to the image file.
+        task_type: "chess" for board analysis, "general" for open-ended description.
+        prompt: Optional custom prompt; overrides the default for the task type.
+
+    Returns:
+        The model's text response, or a formatted error string on failure.
+    """
     image_path = _normalize_query(image_path)
     if not image_path or not os.path.exists(image_path):
         return _format_error("Vision Tool", "image file does not exist")
 
+    # --- Health-check: ensure Ollama is reachable ---
     try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
-        if response.status_code != 200:
-            raise requests.RequestException("Ollama responded with an unexpected status")
+        health = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        if health.status_code != 200:
+            raise requests.RequestException("unexpected status from Ollama")
     except requests.RequestException:
         return _format_error("Vision Tool", "Ollama service not running. Start it with 'ollama serve'.")
 
-    prompt_text = prompt or "Describe the image briefly."
-    if task_type.lower() == "chess":
-        return f"Vision analysis placeholder: {prompt_text}\nChess board analysis would use a local Ollama model and Stockfish when available."
-    return f"Vision analysis placeholder: {prompt_text}\nThis would be answered by a local Ollama vision model when available."
+    # --- Build task-aware prompt ---
+    if prompt:
+        prompt_text = prompt
+    elif task_type.lower() == "chess":
+        prompt_text = (
+            "You are a chess expert. Carefully examine this chess board image. "
+            "Describe the exact position of every piece you can see (use standard algebraic notation for squares). "
+            "Then provide a brief evaluation of the position, noting which side has the advantage and why."
+        )
+    else:
+        prompt_text = "Describe the image in detail, noting key objects, colors, layout, and any text visible."
+
+    # --- Base64-encode the image ---
+    try:
+        with open(image_path, "rb") as img_file:
+            image_b64 = base64.b64encode(img_file.read()).decode("utf-8")
+    except OSError as exc:
+        return _format_error("Vision Tool", f"could not read image file: {exc}")
+
+    # --- Call Ollama /api/generate ---
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "prompt": prompt_text,
+        "images": [image_b64],
+        "stream": False,
+    }
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=120,  # vision inference can be slow on CPU
+        )
+        response.raise_for_status()
+        result = response.json()
+    except requests.RequestException as exc:
+        return _format_error("Vision Tool", f"Ollama API call failed: {exc}")
+    except ValueError as exc:
+        return _format_error("Vision Tool", f"could not parse Ollama response: {exc}")
+
+    model_response = result.get("response", "").strip()
+    if not model_response:
+        return _format_error("Vision Tool", "Ollama returned an empty response")
+
+    return model_response
