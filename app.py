@@ -7,6 +7,15 @@ import requests
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 
+from tools_local import (
+    analyze_image,
+    classify_query,
+    execute_python_code,
+    parse_spreadsheet,
+    process_media,
+    web_search,
+)
+
 load_dotenv()
 
 
@@ -57,14 +66,7 @@ def _coerce_text(value) -> str:
 
 
 def _classify_task(question: str) -> str:
-    normalized = question.lower()
-    if any(keyword in normalized for keyword in ("image", "photo", "picture", "screenshot", "analyze", "describe")):
-        return "image"
-    if any(keyword in normalized for keyword in ("youtube", "video", "transcript", "watch", "clip")):
-        return "video"
-    if any(keyword in normalized for keyword in ("website", "webpage", "url", "site", "browse", "review")):
-        return "website"
-    return "general"
+    return classify_query(question)
 
 
 def _build_answer(task_type: str, question: str) -> str:
@@ -153,27 +155,52 @@ class LangGraphAgent:
             if self.llm is not None:
                 try:
                     prompt = (
-                        "Classify the user's request into one of: general, image, website, or video.\n"
+                        "Classify the user's request into one of: general, image, website, video, audio, code, or excel.\n"
                         f"Question: {question}\n"
                         "Return only one label."
                     )
-                    print(f"self llm is not None, ")
                     response_text = _hf_response(self.llm, prompt)
                     task_type = response_text.strip().lower() or task_type
                 except Exception as exc:
                     print(f"HF routing failed, falling back to heuristic routing: {exc}")
             return {"task_type": task_type}
 
+        def use_tool(state: AgentState) -> dict[str, str]:
+            question = state.get("question", "")
+            task_type = state.get("task_type", "general")
+            evidence = ""
+            try:
+                if task_type == "website":
+                    evidence = web_search(question, max_results=2)
+                elif task_type == "video":
+                    evidence = process_media("youtube", url=question)
+                elif task_type == "audio":
+                    evidence = process_media("audio_file", file_path=question)
+                elif task_type == "code":
+                    evidence = execute_python_code(question)
+                elif task_type == "excel":
+                    evidence = parse_spreadsheet(question)
+                elif task_type == "image":
+                    evidence = analyze_image(question)
+                else:
+                    evidence = web_search(question, max_results=2)
+            except Exception as exc:
+                evidence = f"Error: tool execution failed - {exc}"
+            return {"evidence": evidence}
+
         def answer_question(state: AgentState) -> dict[str, str]:
             question = state.get("question", "")
             task_type = state.get("task_type", "general")
+            evidence = state.get("evidence", "")
             if self.llm is not None:
                 try:
                     prompt = (
                         f"Task type: {task_type}\n"
                         f"Question: {question}\n"
-                        "Provide a concise, practical answer and mention how you would proceed if more evidence is needed."
                     )
+                    if evidence:
+                        prompt += f"\nEvidence from tools:\n{evidence}\n\n"
+                    prompt += "Provide a concise, practical answer and mention how you would proceed if more evidence is needed."
                     answer_text = _hf_response(self.llm, prompt)
                     answer = answer_text.strip() or _build_answer(task_type, question)
                 except Exception as exc:
@@ -185,9 +212,11 @@ class LangGraphAgent:
 
         workflow = StateGraph(AgentState)
         workflow.add_node("route_question", route_question)
+        workflow.add_node("use_tool", use_tool)
         workflow.add_node("answer_question", answer_question)
         workflow.add_edge(START, "route_question")
-        workflow.add_edge("route_question", "answer_question")
+        workflow.add_edge("route_question", "use_tool")
+        workflow.add_edge("use_tool", "answer_question")
         workflow.add_edge("answer_question", END)
         return workflow.compile()
 
@@ -384,6 +413,6 @@ if __name__ == "__main__":
         "share": False,
         "server_name": "localhost",
         "server_port": 7862,
-        "ssr_mode": False,
+        "ssr": False,
     }
     demo.launch(**launch_kwargs)

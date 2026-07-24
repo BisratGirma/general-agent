@@ -8,7 +8,14 @@ from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 from openai import OpenAI
 
-from tools_local import _web_search, _wikipedia_search
+from tools_local import (
+    analyze_image,
+    classify_query,
+    execute_python_code,
+    parse_spreadsheet,
+    process_media,
+    web_search,
+)
 
 load_dotenv()
 
@@ -48,14 +55,7 @@ def _coerce_text(value) -> str:
 
 
 def _classify_task(question: str) -> str:
-    normalized = question.lower()
-    if any(keyword in normalized for keyword in ("image", "photo", "picture", "screenshot", "analyze", "describe")):
-        return "image"
-    if any(keyword in normalized for keyword in ("youtube", "video", "transcript", "watch", "clip")):
-        return "video"
-    if any(keyword in normalized for keyword in ("website", "webpage", "url", "site", "browse", "review")):
-        return "website"
-    return "general"
+    return classify_query(question)
 
 
 def _build_answer(task_type: str, question: str) -> str:
@@ -168,20 +168,23 @@ class LangGraphAgent:
             task_type = state.get("task_type", "general")
             evidence = ""
 
-            if task_type == "website":
-                # Try Wikipedia first, then fall back to web search
-                evidence = _wikipedia_search(question)
-                if "no page found" in evidence.lower() or "failed" in evidence.lower():
-                    evidence += "\n\n" + _web_search(question)
-            elif task_type == "video":
-                # Placeholder: would call YouTube API or transcript tool
-                evidence = "Video tool not yet implemented. Would fetch transcript here."
-            elif task_type == "image":
-                # Placeholder: would use a vision model
-                evidence = "Image tool not yet implemented. Would analyze image here."
-            else:
-                # For general questions, optionally do a quick web search
-                evidence = _web_search(question, max_results=2)
+            try:
+                if task_type == "website":
+                    evidence = web_search(question, max_results=2)
+                elif task_type == "video":
+                    evidence = process_media("youtube", url=question)
+                elif task_type == "audio":
+                    evidence = process_media("audio_file", file_path=question)
+                elif task_type == "code":
+                    evidence = execute_python_code(question)
+                elif task_type == "excel":
+                    evidence = parse_spreadsheet(question)
+                elif task_type == "image":
+                    evidence = analyze_image(question)
+                else:
+                    evidence = web_search(question, max_results=2)
+            except Exception as exc:
+                evidence = f"Error: tool execution failed - {exc}"
 
             print(f"[TOOL] evidence length: {len(evidence)} chars")
             return {"evidence": evidence}

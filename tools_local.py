@@ -1,54 +1,350 @@
-def _wikipedia_search(query: str) -> str:
-    """Search Wikipedia and return a summary."""
-    import requests
+import ast
+import csv
+import logging
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+from typing import Optional
 
-    try:
-        # Wikipedia API search
-        url = "https://en.wikipedia.org/w/api.php"
-        params = {
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "format": "json",
-            "srlimit": 1
-        }
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
+import requests
 
-        if not data["query"]["search"]:
-            return "No Wikipedia page found for this query."
+logger = logging.getLogger(__name__)
 
-        # Get the page extract
-        page_title = data["query"]["search"][0]["title"]
-        params = {
-            "action": "query",
-            "titles": page_title,
-            "prop": "extracts",
-            "exintro": True,
-            "explaintext": True,
-            "format": "json"
-        }
-        response = requests.get(url, params=params, timeout=10)
-        pages = response.json()["query"]["pages"]
-        extract = next(iter(pages.values())).get("extract", "")
-        return f"Wikipedia ({page_title}): {extract[:1000]}"
-    except Exception as e:
-        return f"Wikipedia search failed: {e}"
+SUPPORTED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac", ".ogg")
 
-def _web_search(query: str, max_results: int = 3) -> str:
-    """Perform a web search using DuckDuckGo."""
+
+def _format_error(tool_name: str, message: str) -> str:
+    return f"Error: {tool_name} failed - {message}"
+
+
+def _normalize_query(query: str) -> str:
+    return (query or "").strip()
+
+
+def classify_query(question: str) -> str:
+    normalized = _normalize_query(question).lower()
+    if any(keyword in normalized for keyword in ("image", "photo", "picture", "screenshot", "analyze", "describe")):
+        return "image"
+    if any(keyword in normalized for keyword in ("youtube", "video", "transcript", "watch", "clip")):
+        return "video"
+    if any(keyword in normalized for keyword in ("audio", "transcribe", "speech", "recording")):
+        return "audio"
+    if any(keyword in normalized for keyword in ("python", "execute", "run code", "calculate", "compute", "script")):
+        return "code"
+    if any(keyword in normalized for keyword in ("csv", "xlsx", "excel", "spreadsheet", "sheet", "data file")):
+        return "excel"
+    if any(keyword in normalized for keyword in ("website", "webpage", "url", "site", "browse", "review", "search")):
+        return "website"
+    return "general"
+
+
+def _web_search(query: str, max_results: int = 1) -> str:
+    """Perform a web search using DuckDuckGo and scrape the content of top results."""
+    query = _normalize_query(query)
+    if not query:
+        return _format_error("Web Search", "empty query")
+
     try:
         from ddgs import DDGS
 
         with DDGS() as ddgs:
+            print(f"Performing web search for: {query}")
             results = list(ddgs.text(query, max_results=max_results))
 
         if not results:
             return "No web search results found."
 
         output = []
-        for r in results:
-            output.append(f"- {r['title']}: {r['body'][:200]}...")
-        return "\n".join(output)
-    except Exception as e:
-        return f"Web search failed: {e}"
+        for idx, result in enumerate(results, start=1):
+            title = result.get("title", "Untitled")
+            # DuckDuckGo DDGS typically returns the link in "href" or "link"
+            url = result.get("href") or result.get("link", "")
+
+            if not url:
+                continue
+
+            print(f"Scraping result {idx}: {url}")
+            
+            # Reusing your existing scrape_url tool
+            scraped_content = scrape_url(url)
+
+            output.append(
+                f"=== Source {idx}: {title} ===\n"
+                f"URL: {url}\n"
+                f"Content:\n{scraped_content}\n"
+            )
+
+        return "\n\n".join(output) if output else "No processable URLs found."
+
+    except ImportError:
+        return _format_error("Web Search", "ddgs package is not installed")
+    except Exception as exc:
+        return _format_error("Web Search", str(exc))
+
+def web_search(query: str, max_results: int = 3) -> str:
+    """Try Wikipedia first and fall back to DuckDuckGo if needed."""
+    # wiki_result = _wikipedia_search(query)
+
+    # print(f"Wiki result: {wiki_result}")
+    # if wiki_result.startswith("Error:"):
+    #     fallback = _web_search(query, max_results=max_results)
+    #     return f"{wiki_result}\n\n{fallback}"
+    # if "No Wikipedia page found" not in wiki_result:
+    #     return wiki_result
+
+    web_result = _web_search(query, max_results=max_results)
+
+    print(f"Web search result: {web_result}")
+    return f"{web_result}"
+
+
+import requests
+
+def scrape_url(url: str) -> str:
+    """Fetch a web page and convert it to readable text."""
+    url = _normalize_query(url)
+    if not url.startswith(("http://", "https://")):
+        return _format_error("HTML Scrape", "URL must start with http:// or https://")
+
+    # Pass a descriptive User-Agent or a standard browser User-Agent
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return _format_error("HTML Scrape", str(exc))
+
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return _format_error("HTML Scrape", "beautifulsoup4 is not installed")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    text_parts = []
+    for tag in soup.find_all(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6"]):
+        cleaned = " ".join(tag.get_text(" ", strip=True).split())
+        if cleaned:
+            text_parts.append(cleaned)
+            
+    text = "\n".join(text_parts)[:6000]
+    return text or _format_error("HTML Scrape", "no readable text found")
+
+def process_youtube_transcript(url: str, preferred_language: str = "en") -> str:
+    """Extract a YouTube transcript using youtube-transcript-api when available."""
+    url = _normalize_query(url)
+    if not url:
+        return _format_error("YouTube Transcript", "missing URL")
+
+    match = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+    if not match:
+        return _format_error("YouTube Transcript", "could not find a YouTube video ID")
+    video_id = match.group(1)
+
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return _format_error("YouTube Transcript", "youtube-transcript-api is not installed")
+
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        try:
+            transcript = transcript_list.find_transcript([preferred_language])
+        except Exception:
+            transcript = transcript_list.find_generated_transcript([preferred_language]) if hasattr(transcript_list, "find_generated_transcript") else None
+        if transcript is None:
+            transcript = next(iter(transcript_list), None)
+        if transcript is None:
+            return _format_error("YouTube Transcript", "no transcripts were found for this video")
+        fetched = transcript.fetch()
+        if not fetched:
+            return _format_error("YouTube Transcript", "transcript fetch returned no content")
+        segments = [item.get("text", "") for item in fetched if isinstance(item, dict)]
+        return "\n".join(segments)[:6000]
+    except Exception as exc:
+        return _format_error("YouTube Transcript", str(exc))
+
+
+def transcribe_audio_file(file_path: str, model_size: str = "base") -> str:
+    """Transcribe supported audio files with local Whisper when available."""
+    file_path = _normalize_query(file_path)
+    if not file_path or not os.path.exists(file_path):
+        return _format_error("Whisper", "file does not exist")
+
+    suffix = Path(file_path).suffix.lower()
+    if suffix not in SUPPORTED_AUDIO_EXTENSIONS:
+        supported = ", ".join(SUPPORTED_AUDIO_EXTENSIONS)
+        return _format_error("Whisper", f"unsupported format '{suffix}'. Supported: {supported}")
+
+    try:
+        import whisper
+    except ImportError:
+        return _format_error("Whisper", "openai-whisper is not installed")
+
+    try:
+        model = whisper.load_model(model_size)
+        result = model.transcribe(file_path)
+        text = result.get("text", "")
+        return text or _format_error("Whisper", "no transcription text was produced")
+    except Exception as exc:
+        return _format_error("Whisper", str(exc))
+
+
+def process_media(source_type: str, url: Optional[str] = None, file_path: Optional[str] = None, whisper_model: str = "base", preferred_language: str = "en") -> str:
+    """Route media requests to the appropriate local processing function."""
+    source_type = (source_type or "").lower()
+    if source_type == "youtube":
+        return process_youtube_transcript(url or "", preferred_language=preferred_language)
+    if source_type == "audio_file":
+        return transcribe_audio_file(file_path or "", model_size=whisper_model)
+    return _format_error("Media Tool", "unsupported source type")
+
+
+def execute_python_code(code: str, timeout: int = 30) -> str:
+    """Execute Python code safely in an isolated subprocess."""
+    code = (code or "").strip()
+    if not code:
+        return _format_error("Code Interpreter", "empty code")
+
+    blocked_names = {
+        "os",
+        "subprocess",
+        "sys",
+        "socket",
+        "requests",
+        "shutil",
+        "pathlib",
+        "ctypes",
+        "pickle",
+        "urllib",
+        "http",
+        "ssl",
+        "multiprocessing",
+        "importlib",
+        "builtins",
+    }
+    blocked_calls = {"open", "eval", "exec", "compile", "__import__", "input", "exit", "quit"}
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return _format_error("Code Interpreter", f"syntax error: {exc}")
+
+    class SecurityVisitor(ast.NodeVisitor):
+        def visit_Import(self, node):
+            for alias in node.names:
+                if alias.name.split(".")[0] in blocked_names:
+                    raise ValueError(f"Forbidden import: {alias.name}")
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node):
+            if node.module and node.module.split(".")[0] in blocked_names:
+                raise ValueError(f"Forbidden import: {node.module}")
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            func_name = None
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+            if func_name in blocked_calls:
+                raise ValueError(f"Forbidden call: {func_name}")
+            self.generic_visit(node)
+
+    try:
+        SecurityVisitor().visit(tree)
+    except ValueError as exc:
+        return _format_error("Code Interpreter", f"Security violation - {exc}")
+
+    script = textwrap.dedent(code)
+    kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    try:
+        result = subprocess.run([sys.executable, "-c", script], **kwargs)
+    except subprocess.TimeoutExpired:
+        return _format_error("Code Interpreter", "execution timed out")
+    except Exception as exc:
+        return _format_error("Code Interpreter", str(exc))
+
+    output_parts = []
+    if result.stdout.strip():
+        output_parts.append(result.stdout.strip())
+    if result.stderr.strip():
+        output_parts.append(f"STDERR:\n{result.stderr.strip()}")
+    if not output_parts:
+        return "Output:\n<no output>"
+    return "Output:\n" + "\n".join(output_parts)
+
+
+def parse_spreadsheet(file_path: str, sheet_name: Optional[str] = None, query: Optional[str] = None, row_range: Optional[tuple[int, int]] = None, column_range: Optional[tuple[int, int]] = None) -> str:
+    """Parse CSV or XLSX files into a human-readable summary."""
+    file_path = _normalize_query(file_path)
+    if not file_path or not os.path.exists(file_path):
+        return _format_error("Spreadsheet Parser", "file does not exist")
+
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".csv":
+        try:
+            with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except Exception as exc:
+            return _format_error("Spreadsheet Parser", str(exc))
+        if not rows:
+            return _format_error("Spreadsheet Parser", "no rows found")
+
+        headers = list(rows[0].keys())
+        filtered_rows = list(rows)
+        if query:
+            search_term = query.lower()
+            filtered_rows = [row for row in rows if any(search_term in str(value).lower() for value in row.values())]
+
+        lines = [f"Parsed {Path(file_path).name} ({len(filtered_rows)} matching rows, {len(headers)} columns)"]
+        lines.append(" | ".join(headers))
+        for row in filtered_rows[:10]:
+            lines.append(" | ".join(str(row.get(header, "")) for header in headers))
+        return "\n".join(lines)
+
+    if suffix in {".xlsx", ".xls"}:
+        try:
+            import pandas as pd
+        except ImportError:
+            return _format_error("Spreadsheet Parser", "pandas/openpyxl is not installed")
+        try:
+            data_frame = pd.read_excel(file_path, sheet_name=sheet_name)
+        except Exception as exc:
+            return _format_error("Spreadsheet Parser", str(exc))
+        if query:
+            search_term = query.lower()
+            mask = data_frame.astype(str).apply(lambda column: column.str.contains(search_term, case=False, na=False)).any(axis=1)
+            data_frame = data_frame[mask]
+        return f"Parsed {Path(file_path).name} ({len(data_frame)} rows, {len(data_frame.columns)} columns)\n" + data_frame.head(10).to_string(index=False)
+
+    return _format_error("Spreadsheet Parser", f"unsupported file type '{suffix}'")
+
+
+def analyze_image(image_path: str, task_type: str = "general", prompt: Optional[str] = None) -> str:
+    """Provide a local-only image analysis placeholder that checks for Ollama availability."""
+    image_path = _normalize_query(image_path)
+    if not image_path or not os.path.exists(image_path):
+        return _format_error("Vision Tool", "image file does not exist")
+
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code != 200:
+            raise requests.RequestException("Ollama responded with an unexpected status")
+    except requests.RequestException:
+        return _format_error("Vision Tool", "Ollama service not running. Start it with 'ollama serve'.")
+
+    prompt_text = prompt or "Describe the image briefly."
+    if task_type.lower() == "chess":
+        return f"Vision analysis placeholder: {prompt_text}\nChess board analysis would use a local Ollama model and Stockfish when available."
+    return f"Vision analysis placeholder: {prompt_text}\nThis would be answered by a local Ollama vision model when available."
