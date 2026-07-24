@@ -25,6 +25,154 @@ def _normalize_query(query: str) -> str:
     return (query or "").strip()
 
 
+def _coerce_text(value) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "content"):
+        return str(value.content)
+    if isinstance(value, list):
+        return "\n".join(str(part) for part in value)
+    return str(value)
+
+
+def _build_page_selection_prompt(user_query: str, results: list[dict]) -> str:
+    prompt_lines = [
+        f"user requested this: {user_query}",
+        "",
+        "from the list",
+    ]
+    for result in results:
+        title = result.get("title", "Untitled") or "Untitled"
+        url = result.get("url") or result.get("href") or result.get("link") or ""
+        snippet = (result.get("snippet") or result.get("body") or "").strip()
+        if not url:
+            continue
+        line = f"- {title} / {url}"
+        if snippet:
+            line += f" / snippet: {snippet}"
+        prompt_lines.append(line)
+    prompt_lines.extend([
+        "",
+        "Choose the single website link (page) that most directly contains the information the user requested.",
+        "Prefer text-based pages such as Wikipedia, news articles, or encyclopedia pages.",
+        "Avoid selecting video pages, streaming pages, audio-only content, or social media posts.",
+        "If a Wikipedia page is available, prefer it. Otherwise choose the best text-based page.",
+        "Respond with only the chosen URL.",
+    ])
+    return "\n".join(prompt_lines)
+
+
+def _is_text_webpage_url(url: str) -> bool:
+    url = (url or "").lower()
+    blocked_suffixes = (
+        "youtube.com/watch",
+        "youtu.be/",
+        "vimeo.com/",
+        "tiktok.com/",
+        "instagram.com/",
+        "facebook.com/",
+        "twitter.com/",
+        "soundcloud.com/",
+    )
+    return not any(block in url for block in blocked_suffixes)
+
+
+def _is_wikipedia_query(query: str) -> bool:
+    normalized = (query or "").lower()
+    return "wikipedia" in normalized or "wikimedia" in normalized
+
+
+def _build_llm_client():
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None
+
+    base_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OPENAI_API_BASE")
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_KEY")
+    if not base_url and not api_key:
+        return None
+
+    try:
+        if base_url:
+            return OpenAI(base_url=base_url, api_key=api_key or "openai")
+        return OpenAI(api_key=api_key)
+    except Exception:
+        return None
+
+
+def _select_best_page_from_results(user_query: str, results: list[dict]) -> str:
+    valid_pages = []
+    for result in results:
+        url = result.get("url") or result.get("href") or result.get("link") or ""
+        if url and url.startswith(("http://", "https://")):
+            valid_pages.append({
+                "title": result.get("title", "Untitled"),
+                "url": url,
+                "snippet": result.get("snippet", result.get("body", "")),
+            })
+
+    if not valid_pages:
+        return ""
+
+    text_pages = [page for page in valid_pages if _is_text_webpage_url(page["url"])]
+    if not text_pages:
+        text_pages = valid_pages
+
+    if _is_wikipedia_query(user_query):
+        for page in text_pages:
+            if "wikipedia.org" in page["url"].lower():
+                return page["url"]
+
+    client = _build_llm_client()
+    if client is None:
+        return text_pages[0]["url"]
+
+    prompt = _build_page_selection_prompt(user_query, text_pages)
+    model_name = os.getenv("WEB_SEARCH_SELECTION_MODEL", "gpt-3.5-turbo")
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=64,
+            temperature=0.1,
+            top_p=1.0,
+            stream=False,
+        )
+
+        if hasattr(response, "choices") and response.choices:
+            first_choice = response.choices[0]
+            if hasattr(first_choice, "message"):
+                selected = _coerce_text(getattr(first_choice.message, "content", None)).strip()
+            else:
+                selected = _coerce_text(getattr(first_choice, "text", None)).strip()
+        elif isinstance(response, dict):
+            choices = response.get("choices", [])
+            if choices:
+                choice = choices[0]
+                if isinstance(choice, dict):
+                    message = choice.get("message")
+                    if isinstance(message, dict):
+                        selected = _coerce_text(message.get("content") or message.get("text"))
+                    else:
+                        selected = _coerce_text(choice.get("text"))
+                else:
+                    selected = _coerce_text(choice)
+            else:
+                selected = ""
+        else:
+            selected = _coerce_text(response).strip()
+
+        selected_url = selected.strip().split()[0] if selected else ""
+        if selected_url.startswith(("http://", "https://")) and _is_text_webpage_url(selected_url):
+            return selected_url
+    except Exception:
+        pass
+
+    return text_pages[0]["url"]
+
+
 def classify_query(question: str) -> str:
     normalized = _normalize_query(question).lower()
     if any(keyword in normalized for keyword in ("image", "photo", "picture", "screenshot", "analyze", "describe")):
@@ -42,7 +190,7 @@ def classify_query(question: str) -> str:
     return "general"
 
 
-def _web_search(query: str, max_results: int = 1) -> str:
+def _web_search(query: str, max_results: int = 10) -> str:
     """Perform a web search using DuckDuckGo and scrape the content of top results."""
     query = _normalize_query(query)
     if not query:
@@ -61,40 +209,34 @@ def _web_search(query: str, max_results: int = 1) -> str:
         output = []
         for idx, result in enumerate(results, start=1):
             title = result.get("title", "Untitled")
-            # DuckDuckGo DDGS typically returns the link in "href" or "link"
             url = result.get("href") or result.get("link", "")
-
             if not url:
                 continue
+            output.append({"title": title, "url": url, "snippet": result.get("body", "")})
 
-            print(f"Scraping result {idx}: {url}")
-            
-            # Reusing your existing scrape_url tool
-            scraped_content = scrape_url(url)
+        if not output:
+            return "No processable URLs found."
 
-            output.append(
-                f"=== Source {idx}: {title} ===\n"
-                f"URL: {url}\n"
-                f"Content:\n{scraped_content}\n"
-            )
+        selected_url = _select_best_page_from_results(query, output)
+        if not selected_url:
+            return "No valid page could be selected from search results."
 
-        return "\n\n".join(output) if output else "No processable URLs found."
+        print(f"Selected page to scrape: {selected_url}")
+        scraped_content = scrape_url(selected_url)
+
+        return (
+            f"=== Selected Source ===\n"
+            f"URL: {selected_url}\n"
+            f"Content:\n{scraped_content}"
+        )
 
     except ImportError:
         return _format_error("Web Search", "ddgs package is not installed")
     except Exception as exc:
         return _format_error("Web Search", str(exc))
 
-def web_search(query: str, max_results: int = 3) -> str:
-    """Try Wikipedia first and fall back to DuckDuckGo if needed."""
-    # wiki_result = _wikipedia_search(query)
-
-    # print(f"Wiki result: {wiki_result}")
-    # if wiki_result.startswith("Error:"):
-    #     fallback = _web_search(query, max_results=max_results)
-    #     return f"{wiki_result}\n\n{fallback}"
-    # if "No Wikipedia page found" not in wiki_result:
-    #     return wiki_result
+def web_search(query: str, max_results: int = 10) -> str:
+    """Perform a web search using DuckDuckGo."""
 
     web_result = _web_search(query, max_results=max_results)
 
