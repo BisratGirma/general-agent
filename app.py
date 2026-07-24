@@ -23,7 +23,7 @@ def _initialize_environment() -> None:
     # Ensure dotenv-loaded and alias tokens are normalized for the app.
     os.environ.setdefault(
         "HF_MODEL",
-        os.getenv("HF_MODEL") or os.getenv("HUGGINGFACE_MODEL") or "thinkingmachines/Inkling:together",
+        os.getenv("HF_MODEL") or os.getenv("HUGGINGFACE_MODEL") or "moonshotai/Kimi-K2.5",
     )
     if not os.getenv("HUGGINGFACE_HUB_TOKEN"):
         for alias in ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
@@ -38,6 +38,7 @@ _initialize_environment()
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 HF_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+HF_MODEL = os.getenv("HF_MODEL") or os.getenv("HUGGINGFACE_MODEL") or "moonshotai/Kimi-K2.5"
 
 
 class AgentState(TypedDict, total=False):
@@ -103,9 +104,9 @@ def _build_llm_or_fallback():
     if not hf_token:
         return None
 
-    model_name = os.getenv("HF_MODEL") or os.getenv("HUGGINGFACE_MODEL") or "moonshotai/Kimi-K2.5"
     try:
-        client = InferenceClient(model=model_name, token=hf_token)
+        client = InferenceClient(model=HF_MODEL, token=hf_token)
+        print(f"HF InferenceClient created. model={HF_MODEL}")
         return client
     except Exception as exc:
         print(f"Failed to create Hugging Face InferenceClient: {exc}")
@@ -120,6 +121,7 @@ class LangGraphAgent:
 
     def _build_graph(self):
         def _hf_response(client, prompt: str) -> str:
+            """Send a prompt to the HF Inference model and return the reply text."""
             response = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=256,
@@ -129,13 +131,22 @@ class LangGraphAgent:
                 extra_body={"thinking": {"type": "disabled"}},
             )
 
+            print(f"response : {response.choices[0].message.content if hasattr(response, 'choices') and response.choices else response}")
+
+            # Standard path: response is a ChatCompletion object
             if hasattr(response, "choices") and response.choices:
                 first_choice = response.choices[0]
                 if hasattr(first_choice, "message"):
-                    return _coerce_text(getattr(first_choice.message, "content", None))
+                    msg = first_choice.message
+                    # Thinking models put the answer in `reasoning` when `content` is empty
+                    content = getattr(msg, "content", None)
+                    if not content:
+                        content = getattr(msg, "reasoning", None)
+                    return _coerce_text(content)
                 if hasattr(first_choice, "text"):
                     return _coerce_text(getattr(first_choice, "text", None))
 
+            # Fallback: response came back as a plain dict
             if isinstance(response, dict):
                 choices = response.get("choices", [])
                 if choices:
@@ -163,9 +174,11 @@ class LangGraphAgent:
                     task_type = response_text.strip().lower() or task_type
                 except Exception as exc:
                     print(f"HF routing failed, falling back to heuristic routing: {exc}")
+            print(f"[ROUTE] task_type={task_type}")
             return {"task_type": task_type}
 
         def use_tool(state: AgentState) -> dict[str, str]:
+            """Execute the appropriate tool based on task_type."""
             question = state.get("question", "")
             task_type = state.get("task_type", "general")
             evidence = ""
@@ -186,12 +199,15 @@ class LangGraphAgent:
                     evidence = web_search(question, max_results=2)
             except Exception as exc:
                 evidence = f"Error: tool execution failed - {exc}"
+
+            print(f"[TOOL] evidence length: {len(evidence)} chars")
             return {"evidence": evidence}
 
         def answer_question(state: AgentState) -> dict[str, str]:
             question = state.get("question", "")
             task_type = state.get("task_type", "general")
             evidence = state.get("evidence", "")
+
             if self.llm is not None:
                 try:
                     prompt = (
@@ -199,12 +215,12 @@ class LangGraphAgent:
                         f"Question: {question}\n"
                     )
                     if evidence:
-                        prompt += f"\nEvidence from tools:\n{evidence}\n\n"
-                    prompt += "Provide a concise, practical answer and mention how you would proceed if more evidence is needed."
+                        prompt += f"\n\nEvidence from tools:\n{evidence}\n\n"
+                    prompt += "Provide a concise, accurate answer based on the evidence provided."
                     answer_text = _hf_response(self.llm, prompt)
                     answer = answer_text.strip() or _build_answer(task_type, question)
                 except Exception as exc:
-                    print(f"Hugging Face inference failed, falling back to template response: {exc}")
+                    print(f"HF inference failed, falling back to template response: {exc}")
                     answer = _build_answer(task_type, question)
             else:
                 answer = _build_answer(task_type, question)
@@ -348,16 +364,16 @@ def run_and_submit_all(username: str | None = None):
 
 
 with gr.Blocks() as demo:
-    gr.Markdown("# LangGraph Agent Evaluation Runner")
+    gr.Markdown("# LangGraph Agent — Hugging Face Inference Mode")
     gr.Markdown(
-        """
-        **What this version does:**
+        f"""
+        **Running against the Hugging Face Inference API.**
 
-        - Routes questions into a simple workflow for general Q&A, image analysis, website review, or video review.
+        - Model: `{HF_MODEL}` (set `HF_MODEL` in your `.env` to change)
+        - Routes questions into: general, image, website, video, audio, code, or excel workflows.
         - Uses a LangGraph graph for the orchestration layer.
-        - Keeps the Gradio UI for quick testing while you develop stronger tools.
 
-        **Next steps:** add real browser tools, YouTube transcription tools, and a multimodal model for image understanding.
+        Make sure `HF_TOKEN` is set in your `.env` before using this app.
         """
     )
 
@@ -388,31 +404,17 @@ with gr.Blocks() as demo:
 
 
 if __name__ == "__main__":
-    print("\n" + "-" * 30 + " App Starting " + "-" * 30)
-    space_host_startup = os.getenv("SPACE_HOST")
-    space_id_startup = os.getenv("SPACE_ID")
+    print("\n" + "-" * 30 + " App Starting (HF Inference Mode) " + "-" * 30)
+    print(f"HF model        : {HF_MODEL}")
+    hf_token_startup = get_hf_token()
+    print(f"HF token found  : {'Yes' if hf_token_startup else 'No — set HF_TOKEN in your .env'}")
+    print("-" * (60 + len(" App Starting (HF Inference Mode) ")) + "\n")
 
-    if space_host_startup:
-        print(f"✅ SPACE_HOST found: {space_host_startup}")
-        print(f"   Runtime URL should be: https://{space_host_startup}.hf.space")
-    else:
-        print("ℹ️  SPACE_HOST environment variable not found (running locally?).")
-
-    if space_id_startup:
-        print(f"✅ SPACE_ID found: {space_id_startup}")
-        print(f"   Repo URL: https://huggingface.co/spaces/{space_id_startup}")
-        print(f"   Repo Tree URL: https://huggingface.co/spaces/{space_id_startup}/tree/main")
-    else:
-        print("ℹ️  SPACE_ID environment variable not found (running locally?). Repo URL cannot be determined.")
-
-    print("-" * (60 + len(" App Starting ")) + "\n")
-
-    print("Launching Gradio Interface for the LangGraph Agent...")
-    launch_kwargs = {
-        "debug": True,
-        "share": False,
-        "server_name": "localhost",
-        "server_port": 7862,
-        "ssr": False,
-    }
-    demo.launch(**launch_kwargs)
+    print("Launching Gradio Interface...")
+    demo.launch(
+        debug=True,
+        share=False,
+        server_name="localhost",
+        server_port=7862,
+        ssr_mode=False,
+    )
