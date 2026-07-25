@@ -61,6 +61,32 @@ def _classify_task(question: str) -> str:
     return classify_query(question)
 
 
+def _build_search_query(llm, user_question: str) -> str:
+    """Ask the LLM to turn a natural-language question into a short search-engine query.
+
+    Falls back to the original question if the LLM is unavailable or fails.
+    """
+    if llm is None:
+        return user_question
+
+    prompt = (
+        "Convert the following user question into a concise, keyword-focused search query "
+        "suitable for DuckDuckGo (max 8 words). "
+        "Return ONLY the search query, nothing else.\n\n"
+        f"User question: {user_question}"
+    )
+    try:
+        search_query = llm_response(llm, prompt).strip()
+        # Sanity-check: if the model returned something reasonable, use it
+        if search_query and len(search_query) < len(user_question):
+            print(f"[SEARCH QUERY] reformulated: {search_query!r}")
+            return search_query
+    except Exception as exc:
+        print(f"[SEARCH QUERY] LLM reformulation failed, using original: {exc}")
+
+    return user_question
+
+
 # ---------------------------------------------------------------------------
 # LangGraphAgent
 # ---------------------------------------------------------------------------
@@ -126,10 +152,16 @@ class LangGraphAgent:
         tool = _TOOL_DISPATCH.get(task_type)
         try:
             if tool is not None:
-                evidence = tool(question)  # type: ignore[operator]
+                if task_type == "website":
+                    # For web searches, let the LLM craft a better search query
+                    search_query = _build_search_query(self.llm, question)
+                    evidence = web_search(search_query, max_results=2)
+                else:
+                    evidence = tool(question)  # type: ignore[operator]
             else:
                 # Default: web search for unknown/general queries
-                evidence = web_search(question, max_results=2)
+                search_query = _build_search_query(self.llm, question)
+                evidence = web_search(search_query, max_results=2)
         except Exception as exc:
             evidence = f"Error: tool execution failed - {exc}"
 
