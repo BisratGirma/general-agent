@@ -131,12 +131,21 @@ class LangGraphAgent:
         if self.llm is not None:
             try:
                 prompt = (
-                    "Classify the user's request into one of: "
+                    "Classify the user's request into EXACTLY ONE of these words: "
                     "general, image, website, video, audio, code, or excel.\n"
                     f"Question: {question}\n"
-                    "Return only one label."
+                    "Return ONLY the single label word and nothing else."
                 )
-                task_type = llm_response(self.llm, prompt).strip().lower() or task_type
+                raw_llm_type = llm_response(self.llm, prompt).strip().lower()
+                valid_types = {"general", "image", "website", "video", "audio", "code", "excel"}
+                # Extract exact label word if LLM added explanatory preamble
+                for valid_t in valid_types:
+                    if valid_t in raw_llm_type.split():
+                        task_type = valid_t
+                        break
+                    elif raw_llm_type.endswith(valid_t):
+                        task_type = valid_t
+                        break
             except Exception as exc:
                 print(f"LLM routing failed, falling back to heuristic: {exc}")
 

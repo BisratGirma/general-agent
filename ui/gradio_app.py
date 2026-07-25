@@ -53,6 +53,11 @@ def build_demo(
                     placeholder="Try: review this website, analyze this image, or summarize this video topic",
                     lines=3,
                 )
+                file_input = gr.File(
+                    label="Attach File (Spreadsheet / Image / Audio)",
+                    file_types=[".csv", ".xlsx", ".xls", "image", "audio"],
+                    type="filepath",
+                )
                 ask_button = gr.Button("Ask Agent", variant="primary")
                 agent_output = gr.Textbox(label="Agent Response", lines=8, interactive=False)
 
@@ -71,10 +76,19 @@ def build_demo(
         status_output = gr.Textbox(label="Run Status / Submission Result", lines=5, interactive=False)
         results_table = gr.DataFrame(label="Questions and Agent Answers", wrap=True)
 
+        def _handle_ask(question: str, file_path: str | None) -> str:
+            full_query = question.strip() if question else ""
+            if file_path:
+                if full_query:
+                    full_query = f"{full_query} (File: {file_path})"
+                else:
+                    full_query = f"Process file: {file_path}"
+            return agent(full_query)
+
         # Wire up events
         ask_button.click(
-            fn=lambda q: agent(q),
-            inputs=[question_input],
+            fn=_handle_ask,
+            inputs=[question_input, file_input],
             outputs=[agent_output],
         )
         run_button.click(
