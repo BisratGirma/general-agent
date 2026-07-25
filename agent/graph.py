@@ -158,10 +158,7 @@ class LangGraphAgent:
                     evidence = web_search(search_query, max_results=2)
                 else:
                     evidence = tool(question)  # type: ignore[operator]
-            else:
-                # Default: web search for unknown/general queries
-                search_query = _build_search_query(self.llm, question)
-                evidence = web_search(search_query, max_results=2)
+            # else: task_type == "general" — no tool needed; LLM answers directly
         except Exception as exc:
             evidence = f"Error: tool execution failed - {exc}"
 
