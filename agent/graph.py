@@ -1,0 +1,169 @@
+"""LangGraph workflow and the LangGraphAgent class."""
+
+from __future__ import annotations
+
+from agent.llm import llm_response
+from agent.state import AgentState
+from langgraph.graph import END, START, StateGraph
+from tools import (
+    analyze_image,
+    classify_query,
+    execute_python_code,
+    parse_spreadsheet,
+    process_media,
+    web_search,
+)
+
+# ---------------------------------------------------------------------------
+# Template answers (used when LLM is unavailable)
+# ---------------------------------------------------------------------------
+
+_FALLBACK_ANSWERS: dict[str, str] = {
+    "image": (
+        "Image-analysis workflow ready. I would inspect the image, identify the key "
+        "visual details, and answer the question with grounded observations."
+    ),
+    "website": (
+        "Website-review workflow ready. I would inspect the page content, assess clarity, "
+        "trustworthiness, usability, and summarize strengths and risks."
+    ),
+    "video": (
+        "Video-review workflow ready. I would extract the transcript or key moments, "
+        "summarize the content, and answer the question using evidence from the video."
+    ),
+}
+
+_DEFAULT_FALLBACK = (
+    "General Q&A workflow ready. I would answer directly, clarify ambiguity when needed, "
+    "and provide a concise, helpful response."
+)
+
+# Task-type → tool mapping
+_TOOL_DISPATCH: dict[str, object] = {
+    "website": lambda q: web_search(q, max_results=2),
+    "video":   lambda q: process_media("youtube", url=q),
+    "audio":   lambda q: process_media("audio_file", file_path=q),
+    "code":    execute_python_code,
+    "excel":   parse_spreadsheet,
+    "image":   analyze_image,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _build_fallback_answer(task_type: str, _question: str) -> str:
+    return _FALLBACK_ANSWERS.get(task_type, _DEFAULT_FALLBACK)
+
+
+def _classify_task(question: str) -> str:
+    return classify_query(question)
+
+
+# ---------------------------------------------------------------------------
+# LangGraphAgent
+# ---------------------------------------------------------------------------
+
+class LangGraphAgent:
+    """A LangGraph-based agent that routes, calls tools, and answers questions.
+
+    Args:
+        llm: An optional LLM client (HF ``InferenceClient`` or Ollama ``OpenAI``).
+             When ``None``, the agent falls back to template responses.
+    """
+
+    def __init__(self, llm=None) -> None:
+        print("LangGraphAgent initialized.")
+        self.llm = llm
+        self.graph = self._build_graph()
+
+    # ------------------------------------------------------------------
+    # Graph construction
+    # ------------------------------------------------------------------
+
+    def _build_graph(self):
+        workflow = StateGraph(AgentState)
+        workflow.add_node("route_question", self._route_question)
+        workflow.add_node("use_tool",        self._use_tool)
+        workflow.add_node("answer_question", self._answer_question)
+        workflow.add_edge(START,            "route_question")
+        workflow.add_edge("route_question", "use_tool")
+        workflow.add_edge("use_tool",       "answer_question")
+        workflow.add_edge("answer_question", END)
+        return workflow.compile()
+
+    # ------------------------------------------------------------------
+    # Graph nodes
+    # ------------------------------------------------------------------
+
+    def _route_question(self, state: AgentState) -> dict[str, str]:
+        """Classify the question into a task type using heuristics + optional LLM."""
+        question = state.get("question", "")
+        task_type = _classify_task(question)
+
+        if self.llm is not None:
+            try:
+                prompt = (
+                    "Classify the user's request into one of: "
+                    "general, image, website, video, audio, code, or excel.\n"
+                    f"Question: {question}\n"
+                    "Return only one label."
+                )
+                task_type = llm_response(self.llm, prompt).strip().lower() or task_type
+            except Exception as exc:
+                print(f"LLM routing failed, falling back to heuristic: {exc}")
+
+        print(f"[ROUTE] task_type={task_type}")
+        return {"task_type": task_type}
+
+    def _use_tool(self, state: AgentState) -> dict[str, str]:
+        """Dispatch to the appropriate tool and collect evidence."""
+        question = state.get("question", "")
+        task_type = state.get("task_type", "general")
+        evidence = ""
+
+        tool = _TOOL_DISPATCH.get(task_type)
+        try:
+            if tool is not None:
+                evidence = tool(question)  # type: ignore[operator]
+            else:
+                # Default: web search for unknown/general queries
+                evidence = web_search(question, max_results=2)
+        except Exception as exc:
+            evidence = f"Error: tool execution failed - {exc}"
+
+        print(f"[TOOL] evidence length: {len(evidence)} chars")
+        return {"evidence": evidence}
+
+    def _answer_question(self, state: AgentState) -> dict[str, str]:
+        """Synthesize a final answer using the LLM (or fallback template)."""
+        question = state.get("question", "")
+        task_type = state.get("task_type", "general")
+        evidence = state.get("evidence", "")
+
+        if self.llm is not None:
+            try:
+                prompt = f"Task type: {task_type}\nQuestion: {question}\n"
+                if evidence:
+                    prompt += f"\n\nEvidence from tools:\n{evidence}\n\n"
+                prompt += "Provide a concise, accurate answer based on the evidence provided."
+                answer = llm_response(self.llm, prompt).strip() or _build_fallback_answer(task_type, question)
+            except Exception as exc:
+                print(f"LLM inference failed, falling back to template: {exc}")
+                answer = _build_fallback_answer(task_type, question)
+        else:
+            answer = _build_fallback_answer(task_type, question)
+
+        return {"answer": answer}
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def __call__(self, question: str) -> str:
+        print(f"Agent received question (first 80 chars): {question[:80]}...")
+        state = self.graph.invoke({"question": question})
+        answer = state.get("answer", "")
+        print(f"Agent returning answer: {answer[:120]}...")
+        return answer or "I could not produce an answer for that request."
