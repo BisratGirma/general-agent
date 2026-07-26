@@ -26,6 +26,8 @@ _PROMPTS: dict[str, str] = {
 
 import re
 
+HF_VISION_MODEL = os.getenv("HF_VISION_MODEL") or os.getenv("HF_MODEL") or "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
 
 def _extract_image_path(text: str) -> tuple[str | None, str]:
     """Extract a valid local image filepath and remaining prompt text from input string."""
@@ -59,7 +61,7 @@ def _extract_image_path(text: str) -> tuple[str | None, str]:
     return None, text
 
 
-def analyze_image(
+def analyze_image_ollama(
     image_path: str,
     task_type: str = "general",
     prompt: Optional[str] = None,
@@ -77,7 +79,7 @@ def analyze_image(
     input_text = _normalize_query(image_path)
     actual_path, extracted_prompt = _extract_image_path(input_text)
     if not actual_path:
-        return _format_error("Vision Tool", f"image file does not exist (received: {input_text!r})")
+        return _format_error("Ollama Vision Tool", f"image file does not exist (received: {input_text!r})")
 
     # Health-check: ensure Ollama is reachable
     try:
@@ -85,7 +87,7 @@ def analyze_image(
         if health.status_code != 200:
             raise requests.RequestException("unexpected status from Ollama")
     except requests.RequestException:
-        return _format_error("Vision Tool", "Ollama service not running. Start it with 'ollama serve'.")
+        return _format_error("Ollama Vision Tool", "Ollama service not running. Start it with 'ollama serve'.")
 
     # Choose prompt (custom prompt > prompt extracted from query string > task_type default)
     prompt_text = prompt or extracted_prompt or _PROMPTS.get(task_type.lower(), _PROMPTS["general"])
@@ -95,7 +97,7 @@ def analyze_image(
         with open(actual_path, "rb") as img_file:
             image_b64 = base64.b64encode(img_file.read()).decode("utf-8")
     except OSError as exc:
-        return _format_error("Vision Tool", f"could not read image file: {exc}")
+        return _format_error("Ollama Vision Tool", f"could not read image file: {exc}")
 
     # Call Ollama /api/generate
     payload = {
@@ -113,12 +115,94 @@ def analyze_image(
         response.raise_for_status()
         result = response.json()
     except requests.RequestException as exc:
-        return _format_error("Vision Tool", f"Ollama API call failed: {exc}")
+        return _format_error("Ollama Vision Tool", f"Ollama API call failed: {exc}")
     except ValueError as exc:
-        return _format_error("Vision Tool", f"could not parse Ollama response: {exc}")
+        return _format_error("Ollama Vision Tool", f"could not parse Ollama response: {exc}")
 
     model_response = result.get("response", "").strip()
     if not model_response:
-        return _format_error("Vision Tool", "Ollama returned an empty response")
+        return _format_error("Ollama Vision Tool", "Ollama returned an empty response")
 
     return model_response
+
+
+def analyze_image_hf(
+    image_path: str,
+    task_type: str = "general",
+    prompt: Optional[str] = None,
+) -> str:
+    """Analyze *image_path* using Hugging Face Inference API.
+
+    Args:
+        image_path: Absolute or relative path to the image file, or text containing the path.
+        task_type: ``"chess"`` for board analysis, ``"general"`` for open-ended description.
+        prompt: Optional custom prompt; overrides the default for *task_type*.
+
+    Returns:
+        The model's text response, or a formatted error string on failure.
+    """
+    from agent.llm import get_hf_token
+
+    input_text = _normalize_query(image_path)
+    actual_path, extracted_prompt = _extract_image_path(input_text)
+    if not actual_path:
+        return _format_error("HF Vision Tool", f"image file does not exist (received: {input_text!r})")
+
+    hf_token = get_hf_token()
+    if not hf_token:
+        return _format_error("HF Vision Tool", "Hugging Face API token missing. Set HF_TOKEN in your environment.")
+
+    prompt_text = prompt or extracted_prompt or _PROMPTS.get(task_type.lower(), _PROMPTS["general"])
+
+    try:
+        with open(actual_path, "rb") as img_file:
+            image_bytes = img_file.read()
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    except OSError as exc:
+        return _format_error("HF Vision Tool", f"could not read image file: {exc}")
+
+    # Determine file extension/mime type
+    ext = os.path.splitext(actual_path)[1].lower().strip(".")
+    mime_type = f"image/{ext}" if ext in ["png", "jpg", "jpeg", "webp", "gif", "bmp"] else "image/jpeg"
+    data_url = f"data:{mime_type};base64,{image_b64}"
+
+    try:
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(model=HF_VISION_MODEL, token=hf_token)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ]
+        res = client.chat.completions.create(messages=messages, max_tokens=512)
+        if hasattr(res, "choices") and res.choices:
+            ans = getattr(res.choices[0].message, "content", "").strip()
+            if ans:
+                return ans
+        return _format_error("HF Vision Tool", "Hugging Face API returned an empty response")
+    except Exception as exc:
+        return _format_error("HF Vision Tool", f"Hugging Face Inference call failed: {exc}")
+
+
+def analyze_image(
+    image_path: str,
+    task_type: str = "general",
+    prompt: Optional[str] = None,
+    backend: Optional[str] = None,
+) -> str:
+    """Analyze *image_path* using either Ollama (local) or Hugging Face backend.
+
+    Backend selection logic:
+    1. If `backend` argument is passed, use it ("ollama" or "hf").
+    2. Else check `VISION_BACKEND` env var.
+    3. Default to "ollama".
+    """
+    chosen_backend = (backend or os.getenv("VISION_BACKEND") or "ollama").lower().strip()
+    if chosen_backend in ("hf", "huggingface"):
+        return analyze_image_hf(image_path, task_type=task_type, prompt=prompt)
+    return analyze_image_ollama(image_path, task_type=task_type, prompt=prompt)
+

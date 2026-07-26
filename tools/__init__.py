@@ -13,7 +13,7 @@ from tools.code_exec import execute_python_code
 from tools.common import _coerce_text, _format_error, _normalize_query
 from tools.media import process_media, process_youtube_transcript, transcribe_audio_file
 from tools.spreadsheet import parse_spreadsheet
-from tools.vision import analyze_image
+from tools.vision import analyze_image, analyze_image_hf, analyze_image_ollama
 from tools.web import (
     _build_page_selection_prompt,
     _is_text_webpage_url,
@@ -32,6 +32,8 @@ __all__ = [
     "transcribe_audio_file",
     "parse_spreadsheet",
     "analyze_image",
+    "analyze_image_ollama",
+    "analyze_image_hf",
     "scrape_url",
     "web_search",
     # Private helpers (exposed for testing)

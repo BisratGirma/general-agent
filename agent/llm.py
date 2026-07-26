@@ -27,7 +27,7 @@ HF_TOKEN_ENV_VARS = (
 HF_MODEL = (
     os.getenv("HF_MODEL")
     or os.getenv("HUGGINGFACE_MODEL")
-    or "moonshotai/Kimi-K2.5"
+    or "Qwen/Qwen3-4B-Instruct-2507"
 )
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")

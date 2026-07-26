@@ -19,6 +19,8 @@ from tools import (  # noqa: F401, F403
     _normalize_query,
     _select_best_page_from_results,
     analyze_image,
+    analyze_image_hf,
+    analyze_image_ollama,
     classify_query,
     execute_python_code,
     parse_spreadsheet,
