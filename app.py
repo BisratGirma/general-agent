@@ -66,7 +66,7 @@ if __name__ == "__main__":
     print("Launching Gradio Interface...")
     demo.launch(
         debug=True,
-        share=False,
+        share=True,
         server_name="localhost",
         server_port=7862,
         ssr_mode=False,
