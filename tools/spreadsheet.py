@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from tools.common import _format_error, _normalize_query
+from tools.common import _extract_file_path, _format_error, _normalize_query
 
 
 def parse_spreadsheet(
@@ -20,7 +20,7 @@ def parse_spreadsheet(
     """Parse a CSV or XLSX file and return a human-readable summary.
 
     Args:
-        file_path: Path to the spreadsheet file.
+        file_path: Path to the spreadsheet file, or text containing the path.
         sheet_name: Excel sheet name (XLSX only; ignored for CSV).
         query: Optional filter string — only rows containing this term are shown.
         row_range: Optional ``(start, end)`` row index range (not yet used).
@@ -29,17 +29,23 @@ def parse_spreadsheet(
     Returns:
         A plain-text summary of the parsed data, or a formatted error string.
     """
-    file_path = _normalize_query(file_path)
-    if not file_path or not os.path.exists(file_path):
-        return _format_error("Spreadsheet Parser", "file does not exist")
+    input_text = _normalize_query(file_path)
+    actual_path, extracted_prompt = _extract_file_path(
+        input_text, allowed_extensions=(".csv", ".xlsx", ".xls")
+    )
+    target_path = actual_path or input_text
 
-    suffix = Path(file_path).suffix.lower()
+    if not target_path or not os.path.exists(target_path):
+        return _format_error("Spreadsheet Parser", f"file does not exist (received: {file_path!r})")
+
+    effective_query = query or (extracted_prompt if extracted_prompt and len(extracted_prompt) < 30 else None)
+    suffix = Path(target_path).suffix.lower()
 
     if suffix == ".csv":
-        return _parse_csv(file_path, query)
+        return _parse_csv(target_path, effective_query)
 
     if suffix in {".xlsx", ".xls"}:
-        return _parse_excel(file_path, sheet_name, query)
+        return _parse_excel(target_path, sheet_name, effective_query)
 
     return _format_error("Spreadsheet Parser", f"unsupported file type '{suffix}'")
 
@@ -59,17 +65,21 @@ def _parse_csv(file_path: str, query: Optional[str]) -> str:
         return _format_error("Spreadsheet Parser", "no rows found")
 
     headers = list(rows[0].keys())
-    filtered = (
-        [row for row in rows if any(query.lower() in str(v).lower() for v in row.values())]
-        if query
-        else rows
-    )
+    filtered = rows
+    if query:
+        matching = [row for row in rows if any(query.lower() in str(v).lower() for v in row.values())]
+        if matching:
+            filtered = matching
 
     lines = [f"Parsed {Path(file_path).name} ({len(filtered)} matching rows, {len(headers)} columns)"]
     lines.append(" | ".join(headers))
-    for row in filtered[:10]:
+    for row in filtered[:50]:
         lines.append(" | ".join(str(row.get(h, "")) for h in headers))
-    return "\n".join(lines)
+    if len(filtered) > 50:
+        lines.append(f"... and {len(filtered) - 50} more rows")
+    result_text = "\n".join(lines)
+    print(f"Result: {result_text}")
+    return result_text
 
 
 def _parse_excel(file_path: str, sheet_name: Optional[str], query: Optional[str]) -> str:
@@ -88,10 +98,13 @@ def _parse_excel(file_path: str, sheet_name: Optional[str], query: Optional[str]
         mask = df.astype(str).apply(
             lambda col: col.str.contains(search_term, case=False, na=False)
         ).any(axis=1)
-        df = df[mask]
+        filtered_df = df[mask]
+        if not filtered_df.empty:
+            df = filtered_df
 
     name = Path(file_path).name
     return (
         f"Parsed {name} ({len(df)} rows, {len(df.columns)} columns)\n"
-        + df.head(10).to_string(index=False)
+        + df.head(50).to_string(index=False)
     )
+

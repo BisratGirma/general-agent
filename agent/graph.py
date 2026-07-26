@@ -176,16 +176,23 @@ class LangGraphAgent:
 
     def _answer_question(self, state: AgentState) -> dict[str, str]:
         """Synthesize a final answer using the LLM (or fallback template)."""
+        import re
+
         question = state.get("question", "")
         task_type = state.get("task_type", "general")
         evidence = state.get("evidence", "")
 
+        # Clean file attachment string from question for LLM instruction clarity
+        clean_question = re.sub(r"\(File:\s*[^\)]+\)", "", question, flags=re.IGNORECASE).strip()
+        if not clean_question:
+            clean_question = question
+
         if self.llm is not None:
             try:
-                prompt = f"Task type: {task_type}\nQuestion: {question}\n"
+                prompt = f"User Request: {clean_question}\n"
                 if evidence:
-                    prompt += f"\n\nEvidence from tools:\n{evidence}\n\n"
-                prompt += "Provide a concise, accurate answer based on the evidence provided."
+                    prompt += f"\nContext/Evidence from tools:\n{evidence}\n\n"
+                prompt += f"Based on the evidence above, directly answer the user request: {clean_question}"
                 answer = llm_response(self.llm, prompt).strip() or _build_fallback_answer(task_type, question)
             except Exception as exc:
                 print(f"LLM inference failed, falling back to template: {exc}")
@@ -194,6 +201,7 @@ class LangGraphAgent:
             answer = _build_fallback_answer(task_type, question)
 
         return {"answer": answer}
+
 
     # ------------------------------------------------------------------
     # Public interface

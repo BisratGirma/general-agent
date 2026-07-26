@@ -37,6 +37,22 @@ def test_parse_spreadsheet_handles_csv(tmp_path):
     assert "Ada" in result
 
 
+def test_parse_spreadsheet_embedded_path(tmp_path):
+    csv_path = tmp_path / "trades.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Trade", "PNL"])
+        writer.writerow(["T1", 100])
+        writer.writerow(["T2", -50])
+
+    embedded_query = f"what's the pnl of the trades taken? (File: {csv_path})"
+    result = parse_spreadsheet(embedded_query)
+    assert result.startswith("Parsed")
+    assert "T1" in result
+    assert "100" in result
+
+
+
 def test_build_page_selection_prompt_includes_user_query_and_results():
     user_query = "Find the latest news about renewable energy"
     results = [

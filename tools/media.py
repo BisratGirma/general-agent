@@ -6,9 +6,10 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from tools.common import _format_error, _normalize_query
+from tools.common import _extract_file_path, _format_error, _normalize_query
 
 SUPPORTED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac", ".ogg")
+
 
 
 def process_youtube_transcript(url: str, preferred_language: str = "en") -> str:
@@ -56,9 +57,13 @@ def transcribe_audio_file(file_path: str, model_size: str = "base") -> str:
     """Transcribe a local audio file using OpenAI Whisper."""
     import os
 
-    file_path = _normalize_query(file_path)
+    input_text = _normalize_query(file_path)
+    actual_path, _ = _extract_file_path(input_text, allowed_extensions=SUPPORTED_AUDIO_EXTENSIONS)
+    file_path = actual_path or input_text
+
     if not file_path or not os.path.exists(file_path):
         return _format_error("Whisper", "file does not exist")
+
 
     suffix = Path(file_path).suffix.lower()
     if suffix not in SUPPORTED_AUDIO_EXTENSIONS:

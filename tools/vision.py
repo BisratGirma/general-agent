@@ -97,8 +97,6 @@ def analyze_image(
     except OSError as exc:
         return _format_error("Vision Tool", f"could not read image file: {exc}")
 
-    print(f"Base64 encoded image: {image_b64[:20]}...")
-
     # Call Ollama /api/generate
     payload = {
         "model": OLLAMA_VISION_MODEL,
@@ -114,7 +112,6 @@ def analyze_image(
         )
         response.raise_for_status()
         result = response.json()
-        print(f"Result: {result}")
     except requests.RequestException as exc:
         return _format_error("Vision Tool", f"Ollama API call failed: {exc}")
     except ValueError as exc:
