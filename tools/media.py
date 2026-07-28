@@ -29,7 +29,20 @@ def process_youtube_transcript(url: str, preferred_language: str = "en") -> str:
         return _format_error("YouTube Transcript", "youtube-transcript-api is not installed")
 
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        api = YouTubeTranscriptApi()
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        elif hasattr(api, "list"):
+            transcript_list = api.list(video_id)
+        elif hasattr(YouTubeTranscriptApi, "get_transcript"):
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        else:
+            return _format_error("YouTube Transcript", "unsupported youtube-transcript-api version")
+
+        if isinstance(transcript_list, list):
+            segments = [item.get("text", "") for item in transcript_list if isinstance(item, dict)]
+            return "\n".join(segments)[:6000]
+
         try:
             transcript = transcript_list.find_transcript([preferred_language])
         except Exception:
