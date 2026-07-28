@@ -71,14 +71,14 @@ def transcribe_audio_file(file_path: str, model_size: str = "base") -> str:
         return _format_error("Whisper", f"unsupported format '{suffix}'. Supported: {supported}")
 
     try:
-        import whisper
+        from faster_whisper import WhisperModel
     except ImportError:
-        return _format_error("Whisper", "openai-whisper is not installed")
+        return _format_error("Whisper", "faster-whisper is not installed")
 
     try:
-        model = whisper.load_model(model_size)
-        result = model.transcribe(file_path)
-        text = result.get("text", "")
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(file_path)
+        text = " ".join([segment.text for segment in segments]).strip()
         return text or _format_error("Whisper", "no transcription text was produced")
     except Exception as exc:
         return _format_error("Whisper", str(exc))
